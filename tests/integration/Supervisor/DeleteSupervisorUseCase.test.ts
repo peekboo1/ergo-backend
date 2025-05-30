@@ -1,0 +1,165 @@
+import jwt from "jsonwebtoken";
+import request from "supertest";
+import app from "../../../src/app";
+import { SupervisorModel } from "../../../src/infrastructure/db/models/SupervisorModels";
+import { CompanyModel } from "../../../src/infrastructure/db/models/CompanyModels";
+import { EmployeeModel } from "../../../src/infrastructure/db/models/EmployeeModels";
+import { DivisionModel } from "../../../src/infrastructure/db/models/DivisionModels";
+import { createToken } from "../../../src/shared/utils/JwtUtils";
+import bcrypt from "bcrypt";
+
+const JWT_SECRET = "your-secret-key";
+
+describe("DELETE /api/supervisor/:id (user self delete)", () => {
+  let token: string;
+  let companyId: string;
+  let supervisorId: string;
+
+  beforeAll(async () => {
+    await EmployeeModel.destroy({ where: {}, force: true });
+    await SupervisorModel.destroy({ where: {}, force: true });
+    await DivisionModel.destroy({ where: {}, force: true });
+    await CompanyModel.destroy({ where: {}, force: true });
+
+    const company = await CompanyModel.create({
+      name: "Testing Company",
+      phone: "6282219216616",
+      address: "Test Address",
+      email: "testing@ac.id",
+      website: "testing.ac.id",
+    });
+
+    companyId = company.id;
+
+    const password = await bcrypt.hash("originalPassword", 10);
+    const supervisor = await SupervisorModel.create({
+      name: "Original Supervisor",
+      email: "original@supervisor.com",
+      password,
+      role: "supervisor",
+      companyId,
+    });
+
+    supervisorId = supervisor.id;
+    token = createToken(supervisor.id, "supervisor", supervisor.companyId);
+  });
+
+  it("should delete the user when authenticated and authorized", async () => {
+    const res = await request(app)
+      .delete(`/api/supervisor/${supervisorId}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.message).toMatch(/Supervisor deleted/i);
+
+    const deletedUser = await SupervisorModel.findByPk(supervisorId);
+    expect(deletedUser).toBeNull();
+  });
+
+  it("should return 403 if trying to delete another user's data", async () => {
+    const otherUser = await SupervisorModel.create({
+      name: "Other User",
+      email: "otheruser@example.com",
+      password: await bcrypt.hash("password", 10),
+      role: "supervisor",
+      companyId,
+    });
+
+    const res = await request(app)
+      .delete(`/api/personal/${otherUser.id}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.message).toMatch(/Permission denied/i);
+  });
+
+  it("should return 403 if no token provided", async () => {
+    const res = await request(app).delete(`/api/personal/${supervisorId}`);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.message).toMatch(/No token provided/i);
+  });
+});
+
+describe("DELETE /api/super-admin/spv-data/:id (superadmin delete user)", () => {
+  let userId: string;
+  let superadminToken: string;
+  let companyId: string;
+  let supervisorId: string;
+  let token: string;
+
+  beforeAll(async () => {
+    await SupervisorModel.destroy({ where: {} });
+    await CompanyModel.destroy({ where: {} });
+
+    const company = await CompanyModel.create({
+      name: "Testing Company",
+      phone: "6282219216616",
+      address: "Test Address",
+      email: "testing@ac.id",
+      website: "testing.ac.id",
+    });
+
+    companyId = company.id;
+
+    const password = await bcrypt.hash("originalPassword", 10);
+    const supervisor = await SupervisorModel.create({
+      name: "Original Supervisor",
+      email: "original@supervisor.com",
+      password,
+      role: "supervisor",
+      companyId,
+    });
+
+    supervisorId = supervisor.id;
+    token = createToken(supervisor.id, "supervisor", supervisor.companyId);
+
+    superadminToken = jwt.sign(
+      { userId: "superadmin-id", role: "superadmin" },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+  });
+
+  it("should allow superadmin to delete any user", async () => {
+    const res = await request(app)
+      .delete(`/api/super-admin/spv-data/${supervisorId}`)
+      .set("Authorization", `Bearer ${superadminToken}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.message).toMatch(/Supervisor deleted/i);
+
+    const deletedUser = await SupervisorModel.findByPk(supervisorId);
+    expect(deletedUser).toBeNull();
+  });
+
+  it("should return 404 if user not found", async () => {
+    const nonExistentUUID = "123e4567-e89b-12d3-a456-426614174000";
+
+    const res = await request(app)
+      .delete(`/api/super-admin/personal-data/${nonExistentUUID}`)
+      .set("Authorization", `Bearer ${superadminToken}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/User not found/i);
+  });
+
+  it("should return 403 if not superadmin", async () => {
+    const normalUserToken = jwt.sign(
+      { userId: "some-user-id", role: "personal" },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const res = await request(app)
+      .delete(`/api/super-admin/spv-data/${supervisorId}`)
+      .set("Authorization", `Bearer ${normalUserToken}`);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.message).toMatch(/superadmin only/i);
+  });
+});
+
+afterAll(async () => {
+  await SupervisorModel.sequelize?.close();
+});
